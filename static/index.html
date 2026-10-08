@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebScript Compiler</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1d2330; --muted:#697386; --line:#dfe3ea;
+          --accent:#3b5bdb; --ok:#2b8a3e; --bad:#c92a2a; --code:#f8f9fb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171f; --card:#1c212c; --ink:#e6e9f0; --muted:#8b95a8; --line:#2c3342;
+            --accent:#748ffc; --ok:#69db7c; --bad:#ff8787; --code:#171b24; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 20px;
+           background:var(--card); border-bottom:1px solid var(--line); }
+  header h1 { font-size:18px; margin:0 12px 0 0; }
+  header h1 small { font-weight:400; color:var(--muted); font-size:12px; margin-left:6px; }
+  select, button { font:inherit; padding:6px 12px; border:1px solid var(--line); border-radius:6px;
+                   background:var(--card); color:var(--ink); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; font-weight:600; }
+  label { color:var(--muted); display:flex; gap:6px; align-items:center; }
+  main { display:grid; grid-template-columns: minmax(300px, 4fr) 6fr; gap:16px; padding:16px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .card h2 { margin:0; padding:8px 14px; font-size:12px; text-transform:uppercase; letter-spacing:.06em;
+             color:var(--muted); border-bottom:1px solid var(--line); }
+  .editor { display:flex; height:520px; font:13px/1.55 ui-monospace, Menlo, Consolas, monospace; background:var(--code); }
+  #gutter { padding:10px 8px; text-align:right; color:var(--muted); user-select:none; overflow:hidden;
+            border-right:1px solid var(--line); white-space:pre; }
+  #src { flex:1; border:0; outline:0; resize:none; padding:10px; background:transparent; color:var(--ink);
+         font:inherit; white-space:pre; overflow:auto; tab-size:4; }
+  #pipeline { display:flex; flex-wrap:wrap; gap:6px; padding:10px 14px; border-bottom:1px solid var(--line); }
+  .chip { padding:2px 10px; border-radius:999px; border:1px solid var(--line); color:var(--muted); font-size:12px; }
+  .chip.ok { color:var(--ok); border-color:var(--ok); } .chip.error { color:var(--bad); border-color:var(--bad); }
+  #errors { margin:0; padding:0; list-style:none; }
+  #errors li { padding:8px 14px; color:var(--bad); border-bottom:1px solid var(--line); cursor:pointer; }
+  #errors li b { margin-right:6px; }
+  .tabs { display:flex; flex-wrap:wrap; border-bottom:1px solid var(--line); }
+  .tabs button { border:0; border-radius:0; border-bottom:2px solid transparent; background:none; color:var(--muted); cursor:pointer; }
+  .tabs button.active { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  .panel { display:none; padding:12px 14px; max-height:430px; overflow:auto; }
+  .panel.active { display:block; }
+  pre { margin:0; font:13px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space:pre; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:4px 10px; border-bottom:1px solid var(--line); font-size:13px; }
+  th { color:var(--muted); font-weight:600; }
+  td.mono { font-family:ui-monospace, Menlo, Consolas, monospace; }
+  .check { padding:2px 0; } .check.ok::before { content:"✓ "; color:var(--ok); } .check.bad::before { content:"✗ "; color:var(--bad); }
+  .muted { color:var(--muted); } h3 { margin:14px 0 6px; font-size:13px; } h3:first-child { margin-top:0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>WebScript <small>compiler → JavaScript</small></h1>
+  <select id="examples"></select>
+  <label><input type="checkbox" id="opt" checked> Optimize</label>
+  <button class="primary" id="go">Compile &amp; Run (Ctrl+Enter)</button>
+</header>
+<main>
+  <section class="card">
+    <h2>WebScript source</h2>
+    <div class="editor"><div id="gutter">1</div><textarea id="src" spellcheck="false"></textarea></div>
+  </section>
+  <section class="card">
+    <h2>Compiler phases</h2>
+    <div id="pipeline"></div>
+    <ul id="errors"></ul>
+    <div class="tabs" id="tabs"></div>
+    <div id="panels"></div>
+  </section>
+</main>
+
+<script>
+const PHASES = [["lexical","Lexical"],["syntax","Syntax"],["semantic","Semantic"],
+                ["ir","IR"],["optimization","Optimize"],["codegen","CodeGen"]];
+const TABS = ["Tokens","AST","Symbol table","Semantic","Intermediate","Optimized","JavaScript","Output"];
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+// ---- tabs ----
+TABS.forEach((t, i) => {
+  const b = document.createElement("button"); b.textContent = t; b.onclick = () => showTab(i); $("tabs").append(b);
+  const p = document.createElement("div"); p.className = "panel"; p.id = "panel" + i; $("panels").append(p);
+});
+function showTab(i) {
+  [...$("tabs").children].forEach((b, j) => b.classList.toggle("active", i === j));
+  TABS.forEach((_, j) => $("panel" + j).classList.toggle("active", i === j));
+}
+const setPanel = (i, html) => { $("panel" + i).innerHTML = html; };
+const pre = t => `<pre>${esc(t)}</pre>`;
+const skipped = what => `<p class="muted">${what}</p>`;
+
+// ---- editor ----
+const src = $("src");
+function updateGutter() {
+  $("gutter").textContent = Array.from({length: src.value.split("\n").length}, (_, i) => i + 1).join("\n");
+  $("gutter").scrollTop = src.scrollTop;
+}
+src.addEventListener("input", updateGutter);
+src.addEventListener("scroll", () => { $("gutter").scrollTop = src.scrollTop; });
+src.addEventListener("keydown", e => {
+  if (e.key === "Tab") { e.preventDefault(); document.execCommand("insertText", false, "    "); }
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); compile(); }
+});
+function gotoLine(line, col) {
+  const lines = src.value.split("\n"); let pos = 0;
+  for (let i = 0; i < line - 1 && i < lines.length; i++) pos += lines[i].length + 1;
+  src.focus(); src.setSelectionRange(pos + col - 1, pos + col - 1);
+  src.scrollTop = Math.max(0, (line - 4) * 20);
+}
+
+// ---- running the generated JavaScript safely (Web Worker, 3 s timeout) ----
+function runJS(code) {
+  return new Promise(resolve => {
+    const worker_src = `
+      const out = [];
+      const fake = { log: (...a) => out.push(a.map(x => typeof x === "string" ? x : String(x)).join(" ")) };
+      try { (function (console) {\n${code}\n})(fake); } catch (e) { out.push("Runtime error: " + e.message); }
+      postMessage(out);`;
+    const url = URL.createObjectURL(new Blob([worker_src], {type: "text/javascript"}));
+    const w = new Worker(url);
+    const done = out => { clearTimeout(timer); w.terminate(); URL.revokeObjectURL(url); resolve(out); };
+    const timer = setTimeout(() => done(["Execution stopped: the program ran longer than 3 seconds (infinite loop?)"]), 3000);
+    w.onmessage = e => done(e.data);
+    w.onerror = e => done(["Runtime error: " + e.message]);
+  });
+}
+
+// ---- compile ----
+async function compile() {
+  $("go").disabled = true;
+  let res;
+  try {
+    const r = await fetch("/api/compile", {method: "POST", headers: {"Content-Type": "application/json"},
+                          body: JSON.stringify({source: src.value, optimize: $("opt").checked})});
+    res = await r.json();
+    if (!r.ok) throw new Error(res.error || r.statusText);
+  } catch (e) {
+    $("go").disabled = false;
+    $("errors").innerHTML = `<li><b>Server error:</b> ${esc(e.message)}</li>`;
+    return;
+  }
+  render(res);
+  $("go").disabled = false;
+  if (res.ok) {
+    const out = await runJS(res.phases.codegen.js);
+    setPanel(7, pre(out.length ? out.join("\n") : "(the program printed nothing)"));
+    showTab(7);
+  }
+}
+
+function render(res) {
+  const ph = res.phases;
+  $("pipeline").innerHTML = PHASES.map(([k, name]) => {
+    const s = ph[k].status;
+    return `<span class="chip ${s}">${s === "ok" ? "✓" : s === "error" ? "✗" : "–"} ${name}</span>`;
+  }).join("");
+
+  $("errors").innerHTML = res.errors.map(e =>
+    `<li data-l="${e.line}" data-c="${e.col}"><b>${e.phase} error</b>line ${e.line}, col ${e.col}: ${esc(e.message)}</li>`).join("");
+  $("errors").querySelectorAll("li").forEach(li => li.onclick = () => gotoLine(+li.dataset.l, +li.dataset.c));
+
+  // 0 tokens
+  const toks = ph.lexical.tokens;
+  setPanel(0, ph.lexical.status === "skipped" ? skipped("Not run.") : ph.lexical.status === "error"
+    ? skipped("Lexical error - see the message above.")
+    : `<table><tr><th>#</th><th>Token</th><th>Lexeme</th><th>Line:Col</th></tr>${toks.map((t, i) =>
+        `<tr><td>${i + 1}</td><td class="mono">${esc(t.type)}</td><td class="mono">${esc(t.value)}</td><td>${t.line}:${t.col}</td></tr>`).join("")}</table>`);
+  // 1 AST
+  setPanel(1, ph.syntax.status === "ok" ? pre(ph.syntax.ast) : skipped(ph.syntax.status === "error" ? "Syntax error - see the message above." : "Not run."));
+  // 2 symbol table, 3 semantic
+  const sem = ph.semantic;
+  if (sem.status === "skipped") { setPanel(2, skipped("Not run.")); setPanel(3, skipped("Not run.")); }
+  else {
+    setPanel(2, `<table><tr><th>Name</th><th>Type</th><th>Kind</th><th>Scope</th><th>Line</th><th>Value / Information</th></tr>${sem.symbols.map(s =>
+      `<tr><td class="mono">${esc(s.name)}</td><td>${esc(s.type)}</td><td>${esc(s.kind)}</td><td>${esc(s.scope)}</td><td>${s.line}</td><td class="mono">${esc(s.info)}</td></tr>`).join("")}</table>`);
+    setPanel(3, `<h3>Checks</h3>${sem.checks.map(c => `<div class="check ${c.passed ? "ok" : "bad"}">${esc(c.name)}</div>`).join("")}
+                 <h3>AST annotated with types</h3>${pre(sem.typed_ast)}`);
+  }
+  // 4 IR, 5 optimized
+  setPanel(4, ph.ir.status === "ok" ? pre(ph.ir.lines.join("\n")) : skipped("Not run."));
+  const o = ph.optimization;
+  setPanel(5, o.status === "ok"
+    ? `<h3>Optimizations applied</h3>${o.log.length ? pre(o.log.join("\n")) : skipped("Nothing to optimize in this program.")}<h3>Optimized intermediate code</h3>${pre(o.lines.join("\n"))}`
+    : skipped(o.note || "Not run."));
+  // 6 JS, 7 output
+  setPanel(6, ph.codegen.status === "ok" ? pre(ph.codegen.js) : skipped("Not run."));
+  setPanel(7, skipped(res.ok ? "Running..." : "The program has errors, so nothing was executed."));
+  showTab(res.ok ? 6 : (ph.semantic.status === "error" ? 3 : 0));
+}
+
+// ---- start-up ----
+$("go").onclick = compile;
+fetch("/api/examples").then(r => r.json()).then(list => {
+  $("examples").innerHTML = list.map((e, i) => `<option value="${i}">${esc(e.name)}</option>`).join("");
+  $("examples").onchange = () => { src.value = list[$("examples").value].source; updateGutter(); compile(); };
+  $("examples").onchange();
+});
+showTab(0);
+</script>
+</body>
+</html>
